@@ -26,6 +26,11 @@ import { Keybinds, BIND_ACTIONS, BIND_CATEGORIES, isReservedCode, keyLabel } fro
 import { Settings, GameSettings, BoolSettingKey, NumericSettingKey, SETTING_RANGES } from '../game/settings';
 import { chatPlayerContextActions } from './player_context_menu';
 import {
+  CHAT_CATEGORY_LABELS, CHAT_FILTER_CATEGORIES, DEFAULT_CHAT_CATEGORY_FILTERS,
+  chatCategoryForChannel, chatCategoryForLog, isChatEntryVisible, normalizeChatCategoryFilters, normalizeChatView,
+  type ChatCategory, type ChatCategoryFilters, type ChatView,
+} from './chat_filters';
+import {
   talentsFor, computeTalentModifiers, validateAllocation, dormantNodes, pointsSpent,
   exportBuild, importBuild, cloneAllocation, talentPointsAtLevel, FIRST_TALENT_LEVEL,
   type TalentAllocation, type TalentNode, type SpecDef, type Role, type TalentEffect,
@@ -91,6 +96,12 @@ const PARTY_RANGE_YD = 100;
 // yards past a zone boundary before the crossing banner/welcome commits
 const ZONE_BANNER_DEADBAND = 5;
 const IGNORED_CHAT_NAMES_KEY = 'woc_ignored_chat_names';
+const CHAT_FILTER_STATE_KEY = 'woc_chat_filter_state';
+
+type ChatLogTab = ChatView | 'combat';
+type ChatEntry =
+  | { kind: 'text'; category: ChatCategory; text: string; color: string }
+  | { kind: 'player'; category: ChatCategory; name: string; text: string; color: string; prefix: string; separator: string };
 
 // world map: terrain is pre-rendered for the whole zone at this resolution
 // (cached per zone) and a sub-rect is blitted for the current zoom.
@@ -112,6 +123,7 @@ export class Hud {
   private keybindNote = '';
   private chatLogEl = $('#chatlog');
   private combatLogEl = $('#combatlog');
+  private chatFilterRowEl = $('#chat-filter-row');
   private errorEl = $('#error-msg');
   private bannerEl = $('#banner');
   private tooltipEl = $('#tooltip');
@@ -150,6 +162,9 @@ export class Hud {
   private mapView: { spanX: number; spanZ: number; minX: number; maxX: number; minZ: number; maxZ: number } | null = null;
   private mapDecorations: Decoration[] | null = null; // cached trees/rocks (whole world)
   private ignoredChatNames = new Set<string>();
+  private chatEntries: ChatEntry[] = [];
+  private activeLogTab: ChatLogTab = 'all';
+  private chatCategoryFilters: ChatCategoryFilters = { ...DEFAULT_CHAT_CATEGORY_FILTERS };
   private socialTab: 'friends' | 'guild' | 'ignore' = 'friends';
   // split signatures: structural changes (tab, guild membership) rebuild the
   // whole panel; content-only changes (a friend's presence) refresh just the
@@ -169,8 +184,10 @@ export class Hud {
 
   constructor(private sim: IWorld, private renderer: Renderer, private keybinds: Keybinds) {
     this.ignoredChatNames = this.loadIgnoredChatNames();
+    this.loadChatFilterState();
     this.meters = new Meters(sim);
     this.bindLogTabs();
+    this.bindChatFilterToggles();
     this.loadSlotMap();
     this.buildActionBar();
     this.refreshKeybindLabels();
@@ -266,11 +283,50 @@ export class Hud {
     const tabs = document.querySelectorAll<HTMLButtonElement>('.chat-tab');
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
-        const which = tab.dataset.logTab;
-        tabs.forEach((t) => t.classList.toggle('active', t === tab));
-        $('#chatlog').classList.toggle('active', which === 'chat');
-        $('#combatlog').classList.toggle('active', which === 'combat');
+        const which = this.normalizeLogTab(tab.dataset.logTab);
+        this.activeLogTab = which;
+        this.saveChatFilterState();
+        this.updateLogTabControls();
+        this.renderChatLog();
       });
+    });
+    this.updateLogTabControls();
+  }
+
+  private bindChatFilterToggles(): void {
+    this.chatFilterRowEl.innerHTML = '';
+    for (const category of CHAT_FILTER_CATEGORIES) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chat-filter-toggle';
+      btn.dataset.chatFilter = category;
+      btn.textContent = CHAT_CATEGORY_LABELS[category];
+      btn.addEventListener('click', () => {
+        this.chatCategoryFilters[category] = !this.chatCategoryFilters[category];
+        this.saveChatFilterState();
+        this.updateLogTabControls();
+        this.renderChatLog();
+      });
+      this.chatFilterRowEl.appendChild(btn);
+    }
+    this.updateLogTabControls();
+  }
+
+  private normalizeLogTab(value: unknown): ChatLogTab {
+    return value === 'combat' ? 'combat' : normalizeChatView(value);
+  }
+
+  private updateLogTabControls(): void {
+    document.querySelectorAll<HTMLButtonElement>('.chat-tab').forEach((tab) => {
+      tab.classList.toggle('active', this.normalizeLogTab(tab.dataset.logTab) === this.activeLogTab);
+    });
+    this.chatLogEl.classList.toggle('active', this.activeLogTab !== 'combat');
+    this.combatLogEl.classList.toggle('active', this.activeLogTab === 'combat');
+    this.chatFilterRowEl.classList.toggle('hidden', this.activeLogTab !== 'all');
+    this.chatFilterRowEl.querySelectorAll<HTMLButtonElement>('.chat-filter-toggle').forEach((btn) => {
+      const category = btn.dataset.chatFilter as ChatCategory | undefined;
+      btn.classList.toggle('active', !!category && this.chatCategoryFilters[category]);
+      btn.setAttribute('aria-pressed', String(!!category && this.chatCategoryFilters[category]));
     });
   }
 
@@ -1573,22 +1629,24 @@ export class Hud {
           break;
         case 'chat': {
           if (this.isChatIgnored(ev.from)) break;
-          switch (ev.channel) {
-            case 'party': this.chatLogFrom(ev.from, ev.text, '#7fd4ff', '[Party] ', ': '); break;
-            case 'yell': this.chatLogFrom(ev.from, ev.text, '#ff5040', '', ' yells: '); break;
+          const channel = ev.channel ?? 'say';
+          const category = chatCategoryForChannel(channel);
+          switch (channel) {
+            case 'party': this.chatLogFrom(category, ev.from, ev.text, '#7fd4ff', '[Party] ', ': '); break;
+            case 'yell': this.chatLogFrom(category, ev.from, ev.text, '#ff5040', '', ' yells: '); break;
             case 'whisper':
-              if (ev.to) this.chatLogFrom(ev.to, ev.text, '#ff80ff', 'To ', ': ');
-              else { this.chatLogFrom(ev.from, ev.text, '#ff80ff', '', ' whispers: '); audio.whisper(); }
+              if (ev.to) this.chatLogFrom(category, ev.to, ev.text, '#ff80ff', 'To ', ': ');
+              else { this.chatLogFrom(category, ev.from, ev.text, '#ff80ff', '', ' whispers: '); audio.whisper(); }
               break;
-            case 'general': this.chatLogFrom(ev.from, ev.text, '#ffc864', '[General] ', ': '); break;
-            case 'guild': this.chatLogFrom(ev.from, ev.text, '#40d264', '[Guild] ', ': '); break;
-            case 'officer': this.chatLogFrom(ev.from, ev.text, '#4ce0c0', '[Officer] ', ': '); break;
-            case 'emote': this.chatLogFrom(ev.from, ev.text, '#ff8040', '', ' '); break;
-            default: this.chatLogFrom(ev.from, ev.text, '#f0ead8', '', ' says: '); break;
+            case 'general': this.chatLogFrom(category, ev.from, ev.text, '#ffc864', '[General] ', ': '); break;
+            case 'guild': this.chatLogFrom(category, ev.from, ev.text, '#40d264', '[Guild] ', ': '); break;
+            case 'officer': this.chatLogFrom(category, ev.from, ev.text, '#4ce0c0', '[Officer] ', ': '); break;
+            case 'emote': this.chatLogFrom(category, ev.from, ev.text, '#ff8040', '', ' '); break;
+            default: this.chatLogFrom(category, ev.from, ev.text, '#f0ead8', '', ' says: '); break;
           }
-          if ((ev.channel === 'say' || ev.channel === 'yell' || ev.channel === 'emote') && ev.entityId !== undefined) {
-            const bubble = ev.channel === 'emote' ? `${ev.from} ${ev.text}` : ev.text;
-            this.renderer.showChatBubble(ev.entityId, bubble, ev.channel === 'yell');
+          if ((channel === 'say' || channel === 'yell' || channel === 'emote') && ev.entityId !== undefined) {
+            const bubble = channel === 'emote' ? `${ev.from} ${ev.text}` : ev.text;
+            this.renderer.showChatBubble(ev.entityId, bubble, channel === 'yell');
           }
           break;
         }
@@ -1676,7 +1734,7 @@ export class Hud {
           }
           break;
         }
-        case 'log': this.log(ev.text, ev.color ?? '#ccc'); break;
+        case 'log': this.log(ev.text, ev.color ?? '#ccc', chatCategoryForLog(ev.category)); break;
         case 'playerDeath': {
           this.log('You have died.', '#ff4444');
           audio.death();
@@ -1705,8 +1763,8 @@ export class Hud {
     }
   }
 
-  log(text: string, color = '#ccc'): void {
-    this.appendLog(this.chatLogEl, text, color);
+  log(text: string, color = '#ccc', category: ChatCategory = 'system'): void {
+    this.addChatEntry({ kind: 'text', category, text, color });
   }
 
   private logZoneWelcome(zone: ZoneDef): void {
@@ -1714,23 +1772,45 @@ export class Hud {
     if (text) this.log(text, '#ffd100');
   }
 
-  private chatLogFrom(name: string, text: string, color: string, prefix: string, separator: string): void {
+  private chatLogFrom(category: ChatCategory, name: string, text: string, color: string, prefix: string, separator: string): void {
+    this.addChatEntry({ kind: 'player', category, name, text, color, prefix, separator });
+  }
+
+  private addChatEntry(entry: ChatEntry): void {
+    this.chatEntries.push(entry);
+    while (this.chatEntries.length > 200) this.chatEntries.shift();
+    this.renderChatLog();
+  }
+
+  private renderChatLog(): void {
     const wasNearBottom = this.chatLogEl.scrollHeight - this.chatLogEl.scrollTop - this.chatLogEl.clientHeight < 24;
+    const view = this.activeLogTab === 'combat' ? 'all' : this.activeLogTab;
+    this.chatLogEl.replaceChildren();
+    for (const entry of this.chatEntries) {
+      if (!isChatEntryVisible(entry.category, view, this.chatCategoryFilters)) continue;
+      this.chatLogEl.appendChild(this.renderChatEntry(entry));
+    }
+    if (wasNearBottom) this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
+  }
+
+  private renderChatEntry(entry: ChatEntry): HTMLDivElement {
     const div = document.createElement('div');
-    div.style.color = color;
-    if (prefix) div.append(document.createTextNode(prefix));
+    div.style.color = entry.color;
+    if (entry.kind === 'text') {
+      div.textContent = entry.text;
+      return div;
+    }
+    if (entry.prefix) div.append(document.createTextNode(entry.prefix));
     const sender = document.createElement('span');
     sender.className = 'chat-player-name';
-    sender.textContent = name;
-    sender.title = `Right-click ${name}`;
+    sender.textContent = entry.name;
+    sender.title = `Right-click ${entry.name}`;
     sender.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
-      this.openChatPlayerContextMenu(name, ev.clientX, ev.clientY);
+      this.openChatPlayerContextMenu(entry.name, ev.clientX, ev.clientY);
     });
-    div.append(sender, document.createTextNode(`${separator}${text}`));
-    this.chatLogEl.appendChild(div);
-    while (this.chatLogEl.children.length > 200) this.chatLogEl.removeChild(this.chatLogEl.firstChild!);
-    if (wasNearBottom) this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
+    div.append(sender, document.createTextNode(`${entry.separator}${entry.text}`));
+    return div;
   }
 
   private combatLog(text: string, color = '#ccc'): void {
@@ -3455,6 +3535,27 @@ export class Hud {
     } catch {
       return new Set();
     }
+  }
+
+  private loadChatFilterState(): void {
+    try {
+      const raw = localStorage.getItem(CHAT_FILTER_STATE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      this.chatCategoryFilters = normalizeChatCategoryFilters(parsed?.filters);
+      this.activeLogTab = this.normalizeLogTab(parsed?.activeLogTab);
+    } catch {
+      this.chatCategoryFilters = { ...DEFAULT_CHAT_CATEGORY_FILTERS };
+      this.activeLogTab = 'all';
+    }
+  }
+
+  private saveChatFilterState(): void {
+    try {
+      localStorage.setItem(CHAT_FILTER_STATE_KEY, JSON.stringify({
+        activeLogTab: this.activeLogTab,
+        filters: this.chatCategoryFilters,
+      }));
+    } catch { /* storage unavailable */ }
   }
 
   private saveIgnoredChatNames(): void {

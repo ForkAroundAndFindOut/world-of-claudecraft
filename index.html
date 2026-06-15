@@ -422,13 +422,21 @@
   /* width shrinks on narrower screens so the chat never overlaps the centred
      bottom bar (≈612px wide); caps at 370px when there's room. */
   #chatlog-wrap { position: absolute; left: 12px; bottom: 8px; width: min(370px, calc(50vw - 330px)); }
-  #chatlog-tabs { display: flex; gap: 2px; margin-left: 6px; margin-bottom: -1px; position: relative; z-index: 2; }
-  .chat-tab { height: 22px; padding: 0 12px; border: 1px solid #3a321d; border-bottom: none;
+  #chatlog-tabs { display: flex; gap: 2px; margin-left: 6px; margin-bottom: -1px; max-width: 100%; overflow-x: auto; position: relative; scrollbar-width: none; z-index: 2; }
+  #chatlog-tabs::-webkit-scrollbar { display: none; }
+  .chat-tab { flex: 0 0 auto; height: 22px; padding: 0 8px; border: 1px solid #3a321d; border-bottom: none;
     border-radius: 6px 6px 0 0; background: linear-gradient(#1c1824, #0d0b13); color: #95886a;
     cursor: pointer; font-family: var(--title-font); font-size: 12px; text-shadow: 1px 1px 1px #000; }
   .chat-tab.active { color: var(--gold); border-color: #6f5a2a; background: linear-gradient(#2a2436, #161220); }
-  #chatlog-frame { height: 184px; padding: 0; overflow: hidden; border-radius: 0 6px 6px 6px; }
-  .chat-pane { display: none; height: 100%; overflow-y: auto; overflow-x: hidden; padding: 7px 10px;
+  #chatlog-frame { display: flex; flex-direction: column; height: 184px; padding: 0; overflow: hidden; border-radius: 0 6px 6px 6px; }
+  #chat-filter-row { display: flex; flex: 0 0 auto; gap: 3px; overflow-x: auto; padding: 5px 7px 4px; scrollbar-width: none; }
+  #chat-filter-row::-webkit-scrollbar { display: none; }
+  #chat-filter-row.hidden { display: none; }
+  .chat-filter-toggle { flex: 0 0 auto; height: 19px; padding: 0 7px; border: 1px solid #3a321d; border-radius: 4px;
+    background: linear-gradient(#16131e, #0b0a10); color: #8f8468; cursor: pointer; font-family: var(--title-font);
+    font-size: 10px; text-shadow: 1px 1px 1px #000; }
+  .chat-filter-toggle.active { color: var(--gold); border-color: #6f5a2a; background: linear-gradient(#272030, #121019); }
+  .chat-pane { display: none; flex: 1 1 auto; height: auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 7px 10px;
     font-size: 11px; line-height: 1.45; }
   .chat-pane.active { display: block; }
   .chat-pane div { text-shadow: 1px 1px 1px #000; overflow-wrap: break-word; user-select: text; }
@@ -2927,6 +2935,7 @@
   body.mobile-touch.mobile-chat-open #chatlog-wrap { display: block; }
   body.mobile-touch #chatlog-frame { height: 126px; }
   body.mobile-touch #chatlog-tabs { transform: scale(0.92); transform-origin: left bottom; }
+  body.mobile-touch .chat-filter-toggle { height: 18px; padding: 0 5px; font-size: 9px; }
   body.mobile-touch #chat-input { left: 10px; bottom: calc(296px + env(safe-area-inset-bottom)); width: min(360px, calc(100vw - 20px)); }
   body.mobile-touch #player-frame {
     position: fixed;
@@ -3627,10 +3636,15 @@
 
     <div id="chatlog-wrap">
       <div id="chatlog-tabs">
-        <button class="chat-tab active" data-log-tab="chat">Chat</button>
+        <button class="chat-tab active" data-log-tab="all">All</button>
+        <button class="chat-tab" data-log-tab="local">Local</button>
+        <button class="chat-tab" data-log-tab="global">Global</button>
+        <button class="chat-tab" data-log-tab="whisper">Whispers</button>
+        <button class="chat-tab" data-log-tab="system">System</button>
         <button class="chat-tab" data-log-tab="combat">Combat Log</button>
       </div>
       <div id="chatlog-frame" class="panel">
+        <div id="chat-filter-row" aria-label="All chat filters"></div>
         <div id="chatlog" class="chat-pane active"></div>
         <div id="combatlog" class="chat-pane"></div>
       </div>
